@@ -73,6 +73,7 @@ def smooth_ln_fcs_inplace(ln, fcs, scales,shifts):
     if not isinstance(fcs, list):
         fcs = [fcs]
     if hasattr(ln, 'bias') and ln.bias is not None:
+        #print(f"devices: {ln.bias.device} {shifts.device}")
         ln.bias.sub_(shifts)
         ln.bias.div_(scales)
     else:

@@ -59,6 +59,13 @@ class QuantLinear(nn.Module):
         if self.use_act_quant and not self.disable_input_quant:
             input = self.act_quantizer(input)
         
+        """
+        if weight.device != input.device:
+            weight = weight.to(input.device)
+        if bias.device != input.device:
+            bias = bias.to(input.device)"
+        """
+        #print(f"{input.device} {weight.device} {bias.device}")
         out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
 
 
@@ -67,3 +74,16 @@ class QuantLinear(nn.Module):
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
+    
+    def to(self, device, **kwargs):
+        #print(f"quantliner to device: {device}")
+        # Call the parent class's to() method
+        new_self = super().to(device, **kwargs)
+
+        if hasattr(new_self, "temp_weight"):
+            new_self .temp_weight = new_self .temp_weight.to(device)
+            new_self .temp_bias = new_self .temp_bias.to(device)
+        new_self .weight = new_self .weight.to(device)
+        new_self .bias = new_self.bias.to(device)
+
+        return new_self

@@ -30,11 +30,26 @@ class OmniLayerNorm(nn.Module):
         else:
             weight = self.weight
             bias = self.bias
+        
+        #print(f"devices: {x.device} {weight.device} {bias.device}")
         out = self.norm_func(x,self.normalized_shape,weight, bias,eps=self.eps)
         return out
 
     def set_quant_state(self, use_weight_quant, use_act_quant):
         self.use_act_quant = use_act_quant
+    
+    def to(self, device, **kwargs):
+        #print(f"layernorm to device: {device}")
+        # Call the parent class's to() method
+        new_self = super().to(device, **kwargs)
+
+        if hasattr(new_self, "temp_weight"):
+            new_self.temp_weight = new_self.temp_weight.to(device)
+            new_self.temp_bias = new_self.temp_bias.to(device)
+        new_self.weight = new_self.weight.to(device)
+        new_self.bias = new_self.bias.to(device)
+
+        return new_self
 
 
 class OmniLlamaRMSNorm(nn.Module):

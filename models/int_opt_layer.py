@@ -220,21 +220,40 @@ class QuantOPTAttention(nn.Module):
             if isinstance(m, (QuantLinear, QuantMatMul)):
                 m.set_quant_state(weight_quant, act_quant)
 
+    def to(self, device, **kwargs):
+        #print(f"selfattention to device: {device}")
+        # Call the parent class's to() method
+        newself = super().to(device, **kwargs)
 
+        newself.k_proj = newself.k_proj.to(device)
+        newself.v_proj = newself.v_proj.to(device)
+        newself.q_proj = newself.q_proj.to(device)
+        newself.out_proj = newself.out_proj.to(device)
 
+        return newself
 
-
-
-  
 
 class QuantOPTDecoderLayer(nn.Module):
     def __init__(
         self,
-        config,
-        ori_layer,
-        args,
+        config = None,
+        ori_layer = None,
+        args = None,
+        parts = None
     ):
         super().__init__()
+        if parts is not None:
+            # Parts combiner
+            self.embed_dim = config.hidden_size
+            self.self_attn = parts[0].self_attn
+            self.do_layer_norm_before = config.do_layer_norm_before
+            self.dropout = config.dropout
+            self.self_attn_layer_norm = parts[0].self_attn_layer_norm
+            self.fc1 = parts[1].fc1
+            self.fc2 = parts[1].fc2
+            self.final_layer_norm = parts[1].final_layer_norm
+            self.type = parts[1].type
+            return
         self.embed_dim = config.hidden_size
         self.self_attn = QuantOPTAttention(
             org_module=ori_layer.self_attn,
@@ -312,6 +331,8 @@ class QuantOPTDecoderLayer(nn.Module):
 
         if not self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
+
+        # ------------ Cutoff point 1 --------------------
 
         # Fully Connected
         hidden_states_shape = hidden_states.shape
@@ -449,4 +470,156 @@ class QuantOPTDecoderLayer(nn.Module):
         for name, module in self.named_modules():
             if isinstance(module, QuantLinear):
                 module.weight_quantizer.register_scales_and_zeros()
+    """
+    def to(self, device, **kwargs):
+        #print(f"part 1 to device: {device}")
+        # Call the parent class's to() method
+        newself = super().to(device, **kwargs)
+        newself.self_attn_layer_norm = newself.self_attn_layer_norm.to(device)
+        newself.self_attn = newself.self_attn.to(device)
+
+        return newself
+    """
+
+
+class QuantOPTDecoderLayerPart1(nn.Module):
+    def __init__(
+        self,
+        ori_layer,
+    ):
+        super().__init__()
+        self.self_attn = ori_layer.self_attn
+        self.do_layer_norm_before = ori_layer.do_layer_norm_before
+        self.dropout = ori_layer.dropout
+        self.self_attn_layer_norm = ori_layer.self_attn_layer_norm
+        self.type = ori_layer.fc1.weight.dtype
     
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        **kwargs
+    ):
+        """
+        Args:
+            hidden_states (`torch.Int8Tensor`): the output of previous layer's layernorm in INT8
+            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
+                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
+            layer_head_mask (`torch.FloatTensor`, *optional*): mask for attention heads in a given layer of size
+                `(encoder_attention_heads,)`.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            use_cache (`bool`, *optional*):
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+        """
+
+        # Self Attention
+
+        residual = hidden_states
+        if self.do_layer_norm_before:
+            hidden_states = self.self_attn_layer_norm(hidden_states)
+        # hidden_states = self.self_attn_layer_norm(hidden_states.float()).to(self.type)
+
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            past_key_value=past_key_value,
+            attention_mask=attention_mask,
+            layer_head_mask=layer_head_mask,
+            output_attentions=output_attentions,
+        )
+
+        hidden_states = nn.functional.dropout(hidden_states, p=0.0, training=False)
+
+        hidden_states = residual + hidden_states
+
+        if not self.do_layer_norm_before:
+            hidden_states = self.self_attn_layer_norm(hidden_states)
+
+        return [hidden_states, self_attn_weights, present_key_value, output_attentions, use_cache]
+    
+    def to(self, device, **kwargs):
+        #print(f"part 1 to device: {device}")
+        # Call the parent class's to() method
+        newself = super().to(device, **kwargs)
+        newself.self_attn_layer_norm = newself.self_attn_layer_norm.to(device)
+        newself.self_attn = newself.self_attn.to(device)
+
+        return newself
+    
+
+
+class QuantOPTDecoderLayerPart2(nn.Module):
+    def __init__(
+        self,
+        ori_layer,
+    ):
+        super().__init__()
+        self.do_layer_norm_before = ori_layer.do_layer_norm_before
+        self.dropout = ori_layer.dropout
+        self.self_attn_layer_norm = ori_layer.self_attn_layer_norm
+        self.fc1 = ori_layer.fc1
+        self.fc2 = ori_layer.fc2
+        self.final_layer_norm = ori_layer.final_layer_norm
+        self.type = ori_layer.fc1.weight.dtype
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        self_attn_weights: torch.Tensor,
+        present_key_value: torch.Tensor,
+        output_attentions: bool,
+        use_cache: bool,
+        **kwargs
+    ):
+        """
+        The args are the direct outputs from part-1
+        """
+        # Fully Connected
+        hidden_states_shape = hidden_states.shape
+        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
+        residual = hidden_states
+
+        # residual.add_(hidden_states.to(residual.dtype))
+        if self.do_layer_norm_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+        # hidden_states = self.final_layer_norm(hidden_states.float()).to(self.type)
+
+        
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = F.relu(hidden_states)
+
+        hidden_states = self.fc2(hidden_states)
+        # hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+
+        hidden_states = (residual + hidden_states).view(hidden_states_shape)
+        # residual.add_(hidden_states.to(residual.dtype))
+        if not self.do_layer_norm_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs
+    
+    def to(self, device, **kwargs):
+        #print(f"part 1 to device: {device}")
+        # Call the parent class's to() method
+        newself = super().to(device, **kwargs)
+        newself.self_attn_layer_norm = newself.self_attn_layer_norm.to(device)
+        newself.fc1 = newself.fc1.to(device)
+        newself.fc2 = newself.fc2.to(device)
+        newself.final_layer_norm = newself.final_layer_norm.to(device)
+
+        return newself

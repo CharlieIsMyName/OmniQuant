@@ -1,3 +1,4 @@
+from accelerate import infer_auto_device_map, init_empty_weights
 import torch
 import os
 
@@ -17,6 +18,8 @@ try:
     from llava.model import *   # required for llava
 except ImportError:
     print("If want to quantize llave models, you should manually install llava from https://github.com/haotian-liu/LLaVA")
+
+import torch.onnx as onnx
 
 # import pdb
 
@@ -96,10 +99,14 @@ def get_act_shifts(model, dataloader, num_samples=128):
 
 
 
-def build_model_and_tokenizer(model_name):
-    kwargs = {"torch_dtype": torch.float16, "device_map": "auto"}
+def build_model_and_tokenizer(model_name, dump_graph):
+    if dump_graph:
+        kwargs = {"torch_dtype": torch.float16}
+    else:
+        kwargs = {"torch_dtype": torch.float16, "device_map": "auto", "offload_folder": "offload"}
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+    print(infer_auto_device_map(model))
     return model, tokenizer
 
 def parse_args():
@@ -116,6 +123,7 @@ def parse_args():
     parser.add_argument('--num-samples', type=int, default=128)
     parser.add_argument('--seq-len', type=int, default=2048)
     parser.add_argument("--seed", type=int, default=2, help="Seed for sampling the calibration data.")
+    parser.add_argument("--dump-model", action="store_true", help="dump the model and quit")
     args = parser.parse_args()
     return args
 
@@ -123,7 +131,26 @@ def parse_args():
 @torch.no_grad()
 def main():
     args = parse_args()
-    model, tokenizer = build_model_and_tokenizer(args.model)
+    model, tokenizer = build_model_and_tokenizer(args.model, args.dump_model)
+
+    # Use when need model dumping
+    if args.dump_model:
+        input_text = "This is a dummy input to define the model's input shape."
+        inputs = tokenizer(input_text, return_tensors="pt")
+        model_name = args.model.split("/")[-1] + ".onnx"
+
+        onnx.export(model, 
+                (inputs['input_ids'], inputs['attention_mask']), 
+                model_name, 
+                input_names=['input_ids', 'attention_mask'], 
+                output_names=['output'], 
+                dynamic_axes={'input_ids': {0: 'batch_size', 1: 'sequence_length'}, 
+                            'attention_mask': {0: 'batch_size', 1: 'sequence_length'}, 
+                            'output': {0: 'batch_size', 1: 'sequence_length'}},
+                export_params=False)
+        print(f"The model {model_name} has been successfully exported to ONNX format.")
+        return
+
     dataloader, _ = get_loaders(
     args.calib_dataset,
     nsamples=args.num_samples,
